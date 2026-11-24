@@ -1,0 +1,6 @@
+{
+  "name": "SDA Collections",
+  "description": "SDA Collections — Luxury Indian Jewellery, Heritage Silk Sarees & Designer Ethnic Couture. Fashion · Beauty · Style.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
