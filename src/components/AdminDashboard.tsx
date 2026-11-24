@@ -30,9 +30,11 @@ import { SafeImage } from './SdaLogo';
 interface AdminDashboardProps {
   config: StoreConfig;
   products: Product[];
+  authToken: string;
   onConfigSaved: (next: StoreConfig) => void;
   onProductsChanged: () => void;
   onBackHome: () => void;
+  onUnauthorized: () => void;
   onToast: (msg: string) => void;
 }
 
@@ -47,9 +49,11 @@ type AdminTab =
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   config,
   products,
+  authToken,
   onConfigSaved,
   onProductsChanged,
   onBackHome,
+  onUnauthorized,
   onToast,
 }) => {
   const [activeTab, setActiveTab] = useState<AdminTab>('branding');
@@ -66,29 +70,60 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [newProdWeightGrams, setNewProdWeightGrams] = useState('22');
   const [newProdImage, setNewProdImage] = useState(IMG.kanchiCrimson);
 
+  const authHeaders = (json = false): HeadersInit => ({
+    ...(json ? { 'Content-Type': 'application/json' } : {}),
+    Authorization: `Bearer ${authToken}`,
+  });
+
   useEffect(() => {
     setDraft(config);
   }, [config]);
 
   useEffect(() => {
+    let cancelled = false;
+    fetch('/api/auth/verify', {
+      headers: { Authorization: `Bearer ${authToken}` },
+    })
+      .then((res) => {
+        if (!cancelled && res.status === 401) {
+          onUnauthorized();
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [authToken, onUnauthorized]);
+
+  useEffect(() => {
     if (activeTab === 'orders') {
-      fetch('/api/orders')
-        .then((r) => r.json())
+      fetch('/api/orders', { headers: { Authorization: `Bearer ${authToken}` } })
+        .then((r) => {
+          if (r.status === 401) {
+            onUnauthorized();
+            return [];
+          }
+          return r.json();
+        })
         .then((data) => {
           if (Array.isArray(data)) setOrders(data);
         })
         .catch(() => {});
     }
-  }, [activeTab]);
+  }, [activeTab, authToken, onUnauthorized]);
 
   const handleSaveConfig = async (nextDraft: StoreConfig = draft) => {
     setSaving(true);
     try {
       const res = await fetch('/api/config', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(true),
         body: JSON.stringify(nextDraft),
       });
+      if (res.status === 401) {
+        onUnauthorized();
+        return;
+      }
       if (!res.ok) throw new Error('Failed to save configuration');
       const saved = (await res.json()) as StoreConfig;
       onConfigSaved(saved);
@@ -179,7 +214,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const priceNum = Number(newProdPrice) || 9999;
     const res = await fetch('/api/products', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders(true),
       body: JSON.stringify({
         name: newProdName.trim(),
         category: newProdCat,
@@ -207,6 +242,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         ],
       }),
     });
+    if (res.status === 401) {
+      onUnauthorized();
+      return;
+    }
     if (res.ok) {
       setNewProdName('');
       onProductsChanged();
@@ -224,9 +263,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     );
     const res = await fetch(`/api/products/${product._id}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders(true),
       body: JSON.stringify({ variants: updatedVariants }),
     });
+    if (res.status === 401) {
+      onUnauthorized();
+      return;
+    }
     if (res.ok) {
       onProductsChanged();
       onToast('Variant inventory updated.');
@@ -236,9 +279,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const handleUpdateOrderStatus = async (orderId: string, status: OrderStatus) => {
     const res = await fetch(`/api/orders/${orderId}/status`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders(true),
       body: JSON.stringify({ status }),
     });
+    if (res.status === 401) {
+      onUnauthorized();
+      return;
+    }
     if (res.ok) {
       const updated = (await res.json()) as Order;
       setOrders((prev) => prev.map((o) => (o._id === updated._id ? updated : o)));
@@ -247,7 +294,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const handleResetDefaults = async () => {
-    const res = await fetch('/api/config/reset', { method: 'POST' });
+    const res = await fetch('/api/config/reset', {
+      method: 'POST',
+      headers: authHeaders(),
+    });
+    if (res.status === 401) {
+      onUnauthorized();
+      return;
+    }
     if (res.ok) {
       const data = await res.json();
       setDraft(data.config);

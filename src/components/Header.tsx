@@ -618,16 +618,29 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
 
             <div className="p-4 border-t border-[#D4AF62]/20 bg-[#120D0B] space-y-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setMobileDrawerOpen(false);
-                  onOpenAdmin();
-                }}
-                className="w-full py-2.5 rounded-lg border border-[#D4AF62]/40 text-xs font-medium text-[#D4AF62] hover:bg-[#D4AF62]/10"
-              >
-                {t.header.adminStudio}
-              </button>
+              {user?.role === 'admin' && user.token ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileDrawerOpen(false);
+                    onOpenAdmin();
+                  }}
+                  className="w-full py-2.5 rounded-lg border border-[#D4AF62]/40 text-xs font-medium text-[#D4AF62] hover:bg-[#D4AF62]/10"
+                >
+                  {t.header.adminStudio}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileDrawerOpen(false);
+                    onOpenAccount();
+                  }}
+                  className="w-full py-2.5 rounded-lg border border-[#D4AF62]/30 text-xs font-medium text-[#F8F1E4] hover:border-[#D4AF62] hover:text-[#D4AF62]"
+                >
+                  {user ? user.name : t.header.account}
+                </button>
+              )}
             </div>
           </div>
         </div>

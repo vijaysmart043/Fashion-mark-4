@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   CheckCircle2,
+  Lock,
   LogOut,
   PackageSearch,
   Settings,
@@ -33,30 +34,84 @@ export const AccountModal: React.FC<AccountModalProps> = ({
   const [mode, setMode] = useState<'customer' | 'admin'>('customer');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [requiresAdminSetup, setRequiresAdminSetup] = useState(false);
+  const [checkingAdminStatus, setCheckingAdminStatus] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!open || mode !== 'admin') return;
+    let cancelled = false;
+    setCheckingAdminStatus(true);
+    fetch('/api/auth/admin-status')
+      .then((r) => (r.ok ? r.json() : { requiresSetup: false }))
+      .then((data: { requiresSetup?: boolean }) => {
+        if (!cancelled) {
+          setRequiresAdminSetup(Boolean(data.requiresSetup));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setRequiresAdminSetup(false);
+      })
+      .finally(() => {
+        if (!cancelled) setCheckingAdminStatus(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, mode]);
 
   if (!open) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) {
+      setError('Please enter your email address.');
+      return;
+    }
+
+    if (mode === 'admin' && !password) {
+      setError('Administrator passcode is required.');
+      return;
+    }
+
+    if (mode === 'admin' && requiresAdminSetup) {
+      if (password.length < 8) {
+        setError('Admin passcode must be at least 8 characters.');
+        return;
+      }
+      if (password !== confirmPassword) {
+        setError('Passcodes do not match.');
+        return;
+      }
+    }
+
     setLoading(true);
     try {
-      const res = await fetch('/api/auth/login', {
+      const endpoint =
+        mode === 'admin' && requiresAdminSetup ? '/api/auth/admin-setup' : '/api/auth/login';
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email:
-            mode === 'admin' && !email
-              ? 'admin@sdacollections.in'
-              : email || 'patron@sdacollections.in',
+          email: trimmedEmail,
           password,
           mode,
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Sign in failed');
+      if (!res.ok) {
+        if (data.requiresSetup) {
+          setRequiresAdminSetup(true);
+        }
+        throw new Error(data.error || 'Sign in failed');
+      }
+      setPassword('');
+      setConfirmPassword('');
       onLogin(data as UserSession);
       onClose();
     } catch (err) {
@@ -153,6 +208,8 @@ export const AccountModal: React.FC<AccountModalProps> = ({
                 type="button"
                 onClick={() => {
                   setMode('customer');
+                  setPassword('');
+                  setConfirmPassword('');
                   setError('');
                 }}
                 className={`py-2 rounded text-xs font-medium transition-colors ${
@@ -167,8 +224,9 @@ export const AccountModal: React.FC<AccountModalProps> = ({
                 type="button"
                 onClick={() => {
                   setMode('admin');
-                  setEmail('admin@sdacollections.in');
-                  setPassword('SDA@2026');
+                  setEmail('');
+                  setPassword('');
+                  setConfirmPassword('');
                   setError('');
                 }}
                 className={`py-2 rounded text-xs font-medium transition-colors ${
@@ -181,6 +239,19 @@ export const AccountModal: React.FC<AccountModalProps> = ({
               </button>
             </div>
 
+            {mode === 'admin' && (
+              <div className="flex items-start gap-2.5 p-3 rounded-lg bg-[#211713] border border-[#D4AF62]/25 text-[11px] text-[#C9BCA8]">
+                <Lock className="h-4 w-4 text-[#D4AF62] shrink-0 mt-0.5" />
+                <p>
+                  {checkingAdminStatus
+                    ? 'Verifying administrator security status...'
+                    : requiresAdminSetup
+                    ? 'First-run setup: create your administrator email and passcode (8+ characters) to lock Admin Studio.'
+                    : 'Admin Studio is protected. Enter authorized administrator credentials to continue.'}
+                </p>
+              </div>
+            )}
+
             {error && (
               <p className="text-xs text-rose-400 bg-rose-950/40 border border-rose-500/30 rounded p-2.5">
                 {error}
@@ -191,41 +262,60 @@ export const AccountModal: React.FC<AccountModalProps> = ({
               <input
                 type="email"
                 required
+                autoComplete="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder={
                   mode === 'admin'
-                    ? 'admin@sdacollections.in'
+                    ? 'Administrator email address'
                     : 'Enter your email address'
                 }
                 className="w-full bg-[#211713] border border-[#D4AF62]/25 rounded-lg px-3.5 py-2.5 text-xs text-[#F8F1E4] focus:border-[#D4AF62] focus:outline-none"
               />
               <input
                 type="password"
+                required={mode === 'admin'}
+                minLength={mode === 'admin' && requiresAdminSetup ? 8 : undefined}
+                autoComplete={
+                  mode === 'admin' && requiresAdminSetup ? 'new-password' : 'current-password'
+                }
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder={
                   mode === 'admin'
-                    ? 'Admin Passcode (Demo: SDA@2026)'
+                    ? requiresAdminSetup
+                      ? 'Create admin passcode (min 8 characters)'
+                      : 'Enter administrator passcode'
                     : 'Password (optional for quick patron sign-in)'
                 }
                 className="w-full bg-[#211713] border border-[#D4AF62]/25 rounded-lg px-3.5 py-2.5 text-xs text-[#F8F1E4] focus:border-[#D4AF62] focus:outline-none"
               />
+              {mode === 'admin' && requiresAdminSetup && (
+                <input
+                  type="password"
+                  required
+                  minLength={8}
+                  autoComplete="new-password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Confirm admin passcode"
+                  className="w-full bg-[#211713] border border-[#D4AF62]/25 rounded-lg px-3.5 py-2.5 text-xs text-[#F8F1E4] focus:border-[#D4AF62] focus:outline-none"
+                />
+              )}
             </div>
-
-            {mode === 'admin' && (
-              <p className="text-[11px] text-[#C9BCA8]">
-                Demo Admin: <strong className="text-[#D4AF62]">admin@sdacollections.in</strong> · Passcode:{' '}
-                <strong className="text-[#D4AF62]">SDA@2026</strong>
-              </p>
-            )}
 
             <button
               type="submit"
-              disabled={loading}
-              className="w-full py-3 rounded-lg bg-[#D4AF62] hover:bg-[#E7C77A] text-[#120D0B] text-xs font-semibold uppercase tracking-[0.18em] transition-colors"
+              disabled={loading || (mode === 'admin' && checkingAdminStatus)}
+              className="w-full py-3 rounded-lg bg-[#D4AF62] hover:bg-[#E7C77A] text-[#120D0B] text-xs font-semibold uppercase tracking-[0.18em] transition-colors disabled:opacity-50"
             >
-              {loading ? 'Signing In...' : mode === 'admin' ? 'Enter Admin Studio' : 'Continue'}
+              {loading
+                ? 'Authenticating...'
+                : mode === 'admin'
+                ? requiresAdminSetup
+                  ? 'Claim Admin Studio & Sign In'
+                  : 'Verify & Enter Admin Studio'
+                : 'Continue'}
             </button>
           </form>
         )}

@@ -87,14 +87,7 @@ export default function App() {
     }
   });
 
-  const [user, setUser] = useState<UserSession | null>(() => {
-    try {
-      const saved = localStorage.getItem('sda_user');
-      return saved ? (JSON.parse(saved) as UserSession) : null;
-    } catch {
-      return null;
-    }
-  });
+  const [user, setUser] = useState<UserSession | null>(null);
 
   const [cartOpen, setCartOpen] = useState(false);
   const [wishlistOpen, setWishlistOpen] = useState(false);
@@ -152,12 +145,14 @@ export default function App() {
   }, [wishlistIds]);
 
   useEffect(() => {
-    if (user) {
-      localStorage.setItem('sda_user', JSON.stringify(user));
-    } else {
+    try {
       localStorage.removeItem('sda_user');
+    } catch {
+      // ignore storage errors
     }
-  }, [user]);
+  }, []);
+
+  const isAdminAuthenticated = Boolean(user && user.role === 'admin' && user.token);
 
   const scrollToTop = () => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -403,6 +398,11 @@ export default function App() {
         onOpenWishlist={() => setWishlistOpen(true)}
         onOpenAccount={() => setAccountOpen(true)}
         onOpenAdmin={() => {
+          if (!isAdminAuthenticated) {
+            setAccountOpen(true);
+            showToast('Please sign in with administrator credentials.');
+            return;
+          }
           setView('admin');
           scrollToTop();
         }}
@@ -434,16 +434,50 @@ export default function App() {
           </div>
         </main>
       ) : view === 'admin' ? (
-        <main className="flex-1">
-          <AdminDashboard
-            config={config}
-            products={products}
-            onConfigSaved={(next) => setConfig(next)}
-            onProductsChanged={loadStoreData}
-            onBackHome={handleNavigateHome}
-            onToast={showToast}
-          />
-        </main>
+        isAdminAuthenticated && user?.token ? (
+          <main className="flex-1">
+            <AdminDashboard
+              config={config}
+              products={products}
+              authToken={user.token}
+              onConfigSaved={(next) => setConfig(next)}
+              onProductsChanged={loadStoreData}
+              onBackHome={handleNavigateHome}
+              onUnauthorized={() => {
+                setUser(null);
+                setView('home');
+                setAccountOpen(true);
+                showToast('Admin session expired. Please sign in again.');
+              }}
+              onToast={showToast}
+            />
+          </main>
+        ) : (
+          <main className="flex-1 flex items-center justify-center py-28 px-4">
+            <div className="max-w-md w-full p-8 rounded-2xl bg-[#1A120F] border border-[#D4AF62]/35 text-center space-y-4">
+              <h2 className="font-serif text-2xl text-[#F8F1E4]">Admin Studio Locked</h2>
+              <p className="text-xs text-[#C9BCA8]">
+                Administrator login is required to access store customization, inventory, and orders.
+              </p>
+              <div className="flex flex-col sm:flex-row gap-3 justify-center pt-2">
+                <button
+                  type="button"
+                  onClick={() => setAccountOpen(true)}
+                  className="px-6 py-2.5 rounded-lg bg-[#D4AF62] text-[#120D0B] text-xs font-semibold uppercase tracking-wider"
+                >
+                  Sign In as Admin
+                </button>
+                <button
+                  type="button"
+                  onClick={handleNavigateHome}
+                  className="px-6 py-2.5 rounded-lg border border-[#D4AF62]/30 text-xs text-[#C9BCA8] hover:text-[#F8F1E4]"
+                >
+                  Return to Storefront
+                </button>
+              </div>
+            </div>
+          </main>
+        )
       ) : view === 'shop' ? (
         <main className="flex-1">
           <ShopCatalogView
@@ -724,7 +758,7 @@ export default function App() {
         onLogin={(session) => {
           setUser(session);
           showToast(`Welcome, ${session.name}`);
-          if (session.role === 'admin') {
+          if (session.role === 'admin' && session.token) {
             setView('admin');
             scrollToTop();
           }
@@ -735,6 +769,11 @@ export default function App() {
           showToast('Signed out.');
         }}
         onOpenAdmin={() => {
+          if (!isAdminAuthenticated) {
+            setAccountOpen(true);
+            showToast('Please sign in with administrator credentials.');
+            return;
+          }
           setView('admin');
           scrollToTop();
         }}

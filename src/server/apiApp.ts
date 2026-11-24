@@ -1,16 +1,132 @@
+import crypto from 'crypto';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import { INITIAL_ORDERS, INITIAL_PRODUCTS, INITIAL_STORE_CONFIG } from './seedData.ts';
-import type { Order, Product, StoreConfig } from '../shared/types.ts';
+import type { Order, OrderStatus, Product, StoreConfig } from '../shared/types.ts';
 import { calculateVariantPricing } from '../shared/types.ts';
+
+interface AdminAuthRecord {
+  email: string;
+  passwordHash: string;
+  salt: string;
+  claimedAt: string;
+}
 
 interface StoreDatabase {
   config: StoreConfig;
   products: Product[];
   orders: Order[];
   newsletter: { email: string; subscribedAt: string }[];
+  adminAuth?: AdminAuthRecord;
 }
+
+const VALID_ORDER_STATUSES: OrderStatus[] = [
+  'Confirmed',
+  'Handcrafting & Quality Check',
+  'Dispatched',
+  'Out for Delivery',
+  'Delivered',
+];
+
+const SESSION_SIGNING_KEY =
+  process.env.ADMIN_SESSION_SECRET?.trim() || crypto.randomBytes(32).toString('hex');
+
+function getEnvAdminPasscode(): string {
+  return process.env.ADMIN_PASSCODE?.trim() || '';
+}
+
+function getEnvAdminEmail(): string {
+  return (process.env.ADMIN_EMAIL?.trim() || 'admin@sdacollections.in').toLowerCase();
+}
+
+function safeEqualStrings(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, 'utf-8');
+  const bufB = Buffer.from(b, 'utf-8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function hashPassword(
+  password: string,
+  salt = crypto.randomBytes(16).toString('hex')
+): { salt: string; passwordHash: string } {
+  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
+  return { salt, passwordHash: derived };
+}
+
+function verifyScryptPassword(password: string, salt: string, expectedHash: string): boolean {
+  const derived = crypto.scryptSync(password, salt, 64);
+  const expected = Buffer.from(expectedHash, 'hex');
+  if (derived.length !== expected.length) return false;
+  return crypto.timingSafeEqual(derived, expected);
+}
+
+interface AdminTokenPayload {
+  sub: string;
+  email: string;
+  role: 'admin';
+  exp: number;
+}
+
+function signAdminToken(email: string): string {
+  const payload: AdminTokenPayload = {
+    sub: 'admin-1',
+    email,
+    role: 'admin',
+    exp: Date.now() + 12 * 60 * 60 * 1000,
+  };
+  const encoded = Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', SESSION_SIGNING_KEY)
+    .update(encoded)
+    .digest('base64url');
+  return `${encoded}.${sig}`;
+}
+
+function verifyAdminToken(token: string): AdminTokenPayload | null {
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [encoded, sig] = parts;
+  if (!encoded || !sig) return null;
+  const expectedSig = crypto
+    .createHmac('sha256', SESSION_SIGNING_KEY)
+    .update(encoded)
+    .digest('base64url');
+  if (!safeEqualStrings(sig, expectedSig)) return null;
+  try {
+    const payload = JSON.parse(
+      Buffer.from(encoded, 'base64url').toString('utf-8')
+    ) as AdminTokenPayload;
+    if (
+      payload.role !== 'admin' ||
+      typeof payload.email !== 'string' ||
+      typeof payload.exp !== 'number' ||
+      payload.exp < Date.now()
+    ) {
+      return null;
+    }
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function extractBearerToken(req: express.Request): string {
+  const header = req.headers.authorization || '';
+  if (!header.startsWith('Bearer ')) return '';
+  return header.slice(7).trim();
+}
+
+const requireAdmin: express.RequestHandler = (req, res, next) => {
+  const token = extractBearerToken(req);
+  const payload = token ? verifyAdminToken(token) : null;
+  if (!payload) {
+    res.status(401).json({ error: 'Administrator authentication required.' });
+    return;
+  }
+  next();
+};
 
 const DATA_DIR = process.env.VERCEL
   ? '/tmp/sda-data'
@@ -42,6 +158,7 @@ function ensureDatabase(): StoreDatabase {
           : INITIAL_PRODUCTS,
       orders: Array.isArray(parsed.orders) ? parsed.orders : INITIAL_ORDERS,
       newsletter: Array.isArray(parsed.newsletter) ? parsed.newsletter : [],
+      adminAuth: parsed.adminAuth,
     };
   } catch {
     return {
@@ -78,7 +195,7 @@ export function createApiApp() {
     res.json(db.config);
   });
 
-  app.put('/api/config', (req, res) => {
+  app.put('/api/config', requireAdmin, (req, res) => {
     const incoming = req.body as Partial<StoreConfig>;
     db.config = {
       ...db.config,
@@ -96,12 +213,13 @@ export function createApiApp() {
     res.json(db.config);
   });
 
-  app.post('/api/config/reset', (_req, res) => {
+  app.post('/api/config/reset', requireAdmin, (_req, res) => {
     db = {
       config: INITIAL_STORE_CONFIG,
       products: INITIAL_PRODUCTS,
       orders: db.orders,
       newsletter: db.newsletter,
+      adminAuth: db.adminAuth,
     };
     saveDatabase(db);
     res.json({ config: db.config, productsCount: db.products.length });
@@ -242,7 +360,7 @@ export function createApiApp() {
     res.json(product);
   });
 
-  app.post('/api/products', (req, res) => {
+  app.post('/api/products', requireAdmin, (req, res) => {
     const body = req.body as Partial<Product>;
     if (!body.name || !body.category || !body.subcategory) {
       res.status(400).json({ error: 'Name, category, and subcategory are required.' });
@@ -303,18 +421,19 @@ export function createApiApp() {
     res.status(201).json(newProduct);
   });
 
-  app.put('/api/products/:id', (req, res) => {
+  app.put('/api/products/:id', requireAdmin, (req, res) => {
     const idx = db.products.findIndex((p) => p._id === req.params.id);
     if (idx === -1) {
       res.status(404).json({ error: 'Product not found' });
       return;
     }
-    db.products[idx] = { ...db.products[idx], ...req.body, _id: db.products[idx]._id };
+    const { _id: _ignoredId, ...updates } = (req.body || {}) as Partial<Product>;
+    db.products[idx] = { ...db.products[idx], ...updates, _id: db.products[idx]._id };
     saveDatabase(db);
     res.json(db.products[idx]);
   });
 
-  app.delete('/api/products/:id', (req, res) => {
+  app.delete('/api/products/:id', requireAdmin, (req, res) => {
     db.products = db.products.filter((p) => p._id !== req.params.id);
     saveDatabase(db);
     res.json({ ok: true });
@@ -452,20 +571,23 @@ export function createApiApp() {
     res.status(201).json(newOrder);
   });
 
-  app.get('/api/orders', (_req, res) => {
+  app.get('/api/orders', requireAdmin, (_req, res) => {
     res.json(db.orders);
   });
 
-  app.put('/api/orders/:id/status', (req, res) => {
+  app.put('/api/orders/:id/status', requireAdmin, (req, res) => {
     const order = db.orders.find((o) => o._id === req.params.id || o.orderNumber === req.params.id);
     if (!order) {
       res.status(404).json({ error: 'Order not found' });
       return;
     }
-    if (req.body?.status) {
-      order.status = req.body.status;
-      saveDatabase(db);
+    const nextStatus = req.body?.status as OrderStatus | undefined;
+    if (!nextStatus || !VALID_ORDER_STATUSES.includes(nextStatus)) {
+      res.status(400).json({ error: 'Invalid order status.' });
+      return;
     }
+    order.status = nextStatus;
+    saveDatabase(db);
     res.json(order);
   });
 
@@ -494,30 +616,126 @@ export function createApiApp() {
     res.json({ ok: true, message: 'Welcome to the SDA Collections Royal Circle.' });
   });
 
-  app.post('/api/auth/login', (req, res) => {
-    const { email, password, mode } = req.body as { email?: string; password?: string; mode?: 'customer' | 'admin' };
-    if (!email) {
-      res.status(400).json({ error: 'Email is required.' });
+  app.get('/api/auth/admin-status', (_req, res) => {
+    const requiresSetup = !getEnvAdminPasscode() && !db.adminAuth;
+    res.json({ requiresSetup });
+  });
+
+  app.post('/api/auth/admin-setup', (req, res) => {
+    if (getEnvAdminPasscode() || db.adminAuth) {
+      res.status(403).json({ error: 'Admin credentials are already configured. Please sign in.' });
       return;
     }
-    if (mode === 'admin' || email.toLowerCase() === 'admin@sdacollections.in') {
-      if (password !== 'SDA@2026' && password !== 'admin123') {
-        res.status(401).json({ error: 'Invalid admin passcode. Use SDA@2026 for demo admin access.' });
-        return;
-      }
-      res.json({
-        id: 'admin-1',
-        name: 'SDA Creative Director',
-        email: 'admin@sdacollections.in',
-        role: 'admin',
-        token: 'sda-admin-session',
-      });
+    const { email, password } = req.body as { email?: string; password?: string };
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      res.status(400).json({ error: 'Please enter a valid administrator email address.' });
+      return;
+    }
+    if (typeof password !== 'string' || password.length < 8 || password.length > 128) {
+      res.status(400).json({ error: 'Admin passcode must be between 8 and 128 characters.' });
+      return;
+    }
+    const hashed = hashPassword(password);
+    db.adminAuth = {
+      email: normalizedEmail,
+      salt: hashed.salt,
+      passwordHash: hashed.passwordHash,
+      claimedAt: new Date().toISOString(),
+    };
+    saveDatabase(db);
+    res.status(201).json({
+      id: 'admin-1',
+      name: 'SDA Creative Director',
+      email: normalizedEmail,
+      role: 'admin',
+      token: signAdminToken(normalizedEmail),
+    });
+  });
+
+  app.get('/api/auth/verify', (req, res) => {
+    const token = extractBearerToken(req);
+    const payload = token ? verifyAdminToken(token) : null;
+    if (!payload) {
+      res.status(401).json({ valid: false, error: 'Invalid or expired administrator session.' });
       return;
     }
     res.json({
+      valid: true,
+      user: {
+        id: payload.sub,
+        name: 'SDA Creative Director',
+        email: payload.email,
+        role: 'admin',
+        token,
+      },
+    });
+  });
+
+  app.post('/api/auth/login', (req, res) => {
+    const { email, password, mode } = req.body as {
+      email?: string;
+      password?: string;
+      mode?: 'customer' | 'admin';
+    };
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    if (!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      res.status(400).json({ error: 'Valid email address is required.' });
+      return;
+    }
+
+    const configuredAdminEmail = db.adminAuth?.email || getEnvAdminEmail();
+    const isAdminAttempt =
+      mode === 'admin' ||
+      normalizedEmail === configuredAdminEmail ||
+      normalizedEmail === 'admin@sdacollections.in';
+
+    if (isAdminAttempt) {
+      const envPasscode = getEnvAdminPasscode();
+      if (!envPasscode && !db.adminAuth) {
+        res.status(403).json({
+          error: 'Administrator passcode is not configured yet. Complete first-run setup.',
+          requiresSetup: true,
+        });
+        return;
+      }
+      if (typeof password !== 'string' || !password) {
+        res.status(401).json({ error: 'Administrator passcode is required.' });
+        return;
+      }
+
+      let authenticated = false;
+      if (envPasscode) {
+        authenticated =
+          normalizedEmail === getEnvAdminEmail() && safeEqualStrings(password, envPasscode);
+      } else if (db.adminAuth) {
+        authenticated =
+          normalizedEmail === db.adminAuth.email &&
+          verifyScryptPassword(password, db.adminAuth.salt, db.adminAuth.passwordHash);
+      }
+
+      if (!authenticated) {
+        res.status(401).json({ error: 'Invalid administrator credentials.' });
+        return;
+      }
+
+      res.json({
+        id: 'admin-1',
+        name: 'SDA Creative Director',
+        email: normalizedEmail,
+        role: 'admin',
+        token: signAdminToken(normalizedEmail),
+      });
+      return;
+    }
+
+    res.json({
       id: `cust-${Date.now()}`,
-      name: email.split('@')[0].replace(/[._]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
-      email,
+      name: normalizedEmail
+        .split('@')[0]
+        .replace(/[._]/g, ' ')
+        .replace(/\b\w/g, (c) => c.toUpperCase()),
+      email: normalizedEmail,
       role: 'customer',
       token: 'sda-customer-session',
     });
