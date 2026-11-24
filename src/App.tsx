@@ -25,7 +25,7 @@ import { ProductDetailView } from './components/ProductDetailView';
 import { QuickViewModal } from './components/QuickViewModal';
 import { ShopCatalogView, type ShopFilterState } from './components/ShopCatalogView';
 import { TRANSLATIONS } from './i18n/translations';
-import { INITIAL_STORE_CONFIG } from './server/seedData';
+import { INITIAL_PRODUCTS, INITIAL_STORE_CONFIG } from './server/seedData';
 import type {
   CartItem,
   Language,
@@ -116,16 +116,20 @@ export default function App() {
         fetch('/api/config'),
         fetch('/api/products?limit=100'),
       ]);
-      if (!cfgRes.ok || !prodRes.ok) {
-        throw new Error('Failed to load storefront data.');
+      const cfgType = cfgRes.headers.get('content-type') || '';
+      const prodType = prodRes.headers.get('content-type') || '';
+      if (!cfgRes.ok || !prodRes.ok || !cfgType.includes('json') || !prodType.includes('json')) {
+        throw new Error('API unavailable');
       }
       const cfgData = (await cfgRes.json()) as StoreConfig;
       const prodData = (await prodRes.json()) as { products: Product[] };
       setConfig(cfgData);
       setProducts(prodData.products || []);
       setError('');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to reach server.');
+    } catch {
+      setConfig(INITIAL_STORE_CONFIG);
+      setProducts(INITIAL_PRODUCTS);
+      setError('');
     } finally {
       setLoading(false);
     }
